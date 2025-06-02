@@ -20,9 +20,13 @@ Este proyecto es una aplicación de análisis facial para detectar emociones en 
 ## Estructura del proyecto
 
 ├── app.py # App principal de Streamlit
+
 ├── video_utils.py # Funciones para detección, preprocesado y visualización
+
 ├── model/ # Carpeta con modelo entrenado .h5
+
 ├── requirements.txt # Dependencias del proyecto
+
 └── README.md # Documentación
 
 
