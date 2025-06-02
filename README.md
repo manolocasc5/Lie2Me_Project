@@ -44,60 +44,54 @@ Se asume que el modelo `mobilenetv2_emotion_binario_finetune.h5` ya está entren
 
 ```bash
 pip install -r requirements.txt
+```
 
-Ejecuta la app Streamlit:
+2. Ejecuta la app Streamlit:
 
-bash
-Copiar
-Editar
+```bash
 streamlit run app.py
-En la interfaz web puedes:
+```
 
-Elegir "Cámara en vivo" para capturar video desde la webcam.
+3. En la interfaz web puedes:
 
-Subir un archivo de video para analizarlo.
+- Elegir "Cámara en vivo" para capturar video desde la webcam.
 
-Visualizar predicciones en tiempo real y descarga de resultados.
+- Subir un archivo de video para analizarlo.
 
-Tecnologías
-TensorFlow/Keras (Transfer Learning con MobileNetV2)
+- Visualizar predicciones en tiempo real y descarga de resultados.
 
-OpenCV (procesamiento de video)
+### Tecnologías
+- TensorFlow/Keras (Transfer Learning con MobileNetV2)
 
-face_recognition (detección facial)
+- OpenCV (procesamiento de video)
 
-Streamlit (interfaz web interactiva)
+- face_recognition (detección facial)
 
-Matplotlib (visualización de gráficos)
+- Streamlit (interfaz web interactiva)
 
-Requisitos
-Python 3.7+
+- Matplotlib (visualización de gráficos)
 
-GPU recomendada para entrenamiento (opcional para inferencia)
+### Requisitos
+- Python 3.7+
 
-Licencia
+- GPU recomendada para entrenamiento (opcional para inferencia)
+
+## Licencia
 MIT License
 
-Autor
+## Autores
 Tu Nombre - [Tu Email o GitHub]
-
-yaml
-Copiar
-Editar
 
 ---
 
 ## requirements.txt
 
-tensorflow>=2.11.0
-opencv-python-headless
-face_recognition
-streamlit
-matplotlib
-numpy
-pandas
-Pillow
+- tensorflow>=2.11.0
+- opencv-python-headless
+- face_recognition
+- streamlit
+- matplotlib
+- numpy
+- pandas
+- Pillow
 
-yaml
-Copiar
-Editar
