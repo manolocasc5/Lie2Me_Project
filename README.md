@@ -19,6 +19,8 @@ Este proyecto es una aplicación de análisis facial para detectar emociones en 
 
 ## Estructura del proyecto
 
+├── Lie2Me_Project.ipynb # Notebook para entrenar modelo
+
 ├── app.py # App principal de Streamlit
 
 ├── video_utils.py # Funciones para detección, preprocesado y visualización
