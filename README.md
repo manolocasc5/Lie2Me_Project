@@ -97,3 +97,4 @@ Tu Nombre - [Tu Email o GitHub]
 - pandas
 - Pillow
 
+pip install -r requirements.txt

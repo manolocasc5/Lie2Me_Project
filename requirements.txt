@@ -1,8 +1,7 @@
-tensorflow>=2.11.0
-opencv-python-headless
-face_recognition
-streamlit
-matplotlib
+opencv-python
 numpy
+tensorflow
+streamlit
 pandas
-Pillow
+matplotlib
+ffmpeg-python
