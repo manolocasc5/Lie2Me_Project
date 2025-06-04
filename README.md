@@ -35,18 +35,31 @@ Este proyecto es una aplicación de análisis multimodal que combina el procesam
 ## 📁 Estructura del Proyecto
 .
 ├── app.py                     # Aplicación principal de Streamlit
+
 ├── video_utils.py             # Funciones auxiliares para procesamiento de vídeo y audio
+
 ├── requirements.txt           # Lista de dependencias de Python
+
 ├── README.md                  # Este archivo de documentación
+
 └── model/                     # Carpeta para modelos entrenados y archivos auxiliares
+
     ├── mobilenetv2_emotion_binario_finetune.h5 # Modelo de vídeo (predicción facial)
+    
     ├── audio_emotion_model.h5 # Modelo de audio (predicción vocal)
+    
     ├── audio_scaler.npy       # Escalador para los embeddings de audio
+    
     ├── haarcascade_frontalface_default.xml # Clasificador de Haar para detección facial
+    
     └── yamnet/                # Carpeta que contiene el modelo YAMNet de TensorFlow Hub
+    
         ├── saved_model.pb
+        
         └── variables/
+        
         └── assets/
+        
         └── ... (otros archivos de YAMNet)
 
 ## 🚀 Cómo Usar
