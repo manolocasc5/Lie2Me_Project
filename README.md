@@ -34,6 +34,7 @@ Este proyecto es una aplicación de análisis multimodal que combina el procesam
 
 ## 📁 Estructura del Proyecto
 .
+
 ├── app.py                     # Aplicación principal de Streamlit
 
 ├── video_utils.py             # Funciones auxiliares para procesamiento de vídeo y audio
