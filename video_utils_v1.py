@@ -4,14 +4,10 @@ import tensorflow as tf
 from tensorflow.keras.preprocessing.image import img_to_array
 import matplotlib.pyplot as plt
 import ffmpeg # Asegúrate de que ffmpeg-python está instalado (pip install ffmpeg-python)
-import os 
-import librosa # Para procesamiento de audio
-import soundfile as sf # Para guardar archivos de audio
+import os # Necesario para verificar si el archivo existe
 
 # --- Configuración global ---
 IMG_SIZE = 224 # Tamaño al que se redimensionan los rostros para el modelo
-AUDIO_SAMPLE_RATE = 22050 # Frecuencia de muestreo estándar para audio
-AUDIO_MFCCS = 40 # Número de MFCCs a extraer
 
 # Variable global para el clasificador de Haar, inicializado por una función.
 face_cascade = None 
@@ -34,7 +30,7 @@ def init_face_cascade_classifier():
     except Exception as e:
         return f"Error crítico al cargar el clasificador de Haar: {e}. La detección de rostros no funcionará. Asegúrate de que 'haarcascade_frontalface_default.xml' está disponible y en la ruta correcta.", False
 
-# --- FUNCIÓN: Obtener ángulo de rotación del video (sin cambios) ---
+# --- FUNCIÓN: Obtener ángulo de rotación del video ---
 def get_video_rotation(video_path):
     """
     Obtiene el ángulo de rotación de un video a partir de sus metadatos usando ffprobe.
@@ -46,8 +42,10 @@ def get_video_rotation(video_path):
         return 0
 
     try:
+        # Se usa 'capture_stderr=True' para poder decodificar mensajes de error de ffmpeg
         probe = ffmpeg.probe(video_path, select_streams='v', show_streams=None) 
         
+        # Busca específicamente el stream de video
         video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
         
         if video_stream and 'tags' in video_stream:
@@ -55,112 +53,53 @@ def get_video_rotation(video_path):
             if rotation_tag is not None:
                 try:
                     rotation = int(rotation_tag)
+                    # ffprobe puede reportar 90 grados como -270 y 270 como -90.
+                    # Normalizamos a 0, 90, 180, 270.
                     if rotation == -90:
                         return 270
                     elif rotation == -270:
                         return 90
                     else:
-                        return rotation % 360 
+                        return rotation % 360 # Asegura que esté en el rango 0-359
                 except ValueError:
                     print(f"Advertencia (get_video_rotation): El valor de rotación '{rotation_tag}' no es un número entero. Asumiendo 0 grados.")
                     return 0
+        
+        # Como fallback, también se puede buscar en la matriz de visualización (displaymatrix)
+        # Esto es menos común para el tag 'rotate', pero a veces ocurre.
+        # Es más complejo de parsear directamente el ángulo de la matriz, así que nos centramos en 'rotate'.
+        # Si no se encuentra 'rotate', asumimos 0.
+
     except ffmpeg.Error as e:
+        # Imprime el error stderr de ffmpeg para un diagnóstico más claro
         print(f"Error (get_video_rotation) al obtener metadatos de rotación con ffprobe: {e.stderr.decode()}")
     except Exception as e:
         print(f"Error inesperado (get_video_rotation) al obtener metadatos de rotación: {e}")
     
-    return 0 
+    return 0 # Si no se encuentra rotación o hay un error, asumimos 0 grados
 
-# --- FUNCIÓN: Rotar un frame (sin cambios) ---
+# --- FUNCIÓN: Rotar un frame ---
 def rotate_frame_if_needed(frame, rotation_angle):
     """
     Rota un frame de OpenCV según el ángulo de rotación especificado.
+    
+    Args:
+        frame (np.array): El frame de imagen de OpenCV (BGR).
+        rotation_angle (int): El ángulo de rotación en grados (0, 90, 180, 270).
+
+    Returns:
+        np.array: El frame rotado.
     """
     if rotation_angle == 90:
         return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
     elif rotation_angle == 180:
         return cv2.rotate(frame, cv2.ROTATE_180)
-    elif rotation_angle == 270: 
+    elif rotation_angle == 270: # Equivalente a ROTATE_90_COUNTERCLOCKWISE
         return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     else:
-        return frame 
+        return frame # No se necesita rotación o ángulo no reconocido
 
-# --- NUEVA FUNCIÓN: Extraer audio de video ---
-def extract_audio_from_video(video_path, audio_output_path):
-    """
-    Extrae la pista de audio de un archivo de video usando FFmpeg.
-    """
-    try:
-        # Comando FFmpeg para extraer audio sin recodificar (copia directa)
-        # -vn: no video
-        # -acodec copy: copia el códec de audio original sin recodificar
-        # -y: sobrescribir archivo de salida si existe
-        ffmpeg_command = [
-            "ffmpeg",
-            "-i", video_path,
-            "-vn",
-            "-acodec", "copy",
-            "-y",
-            audio_output_path
-        ]
-        
-        subprocess.run(ffmpeg_command, check=True, capture_output=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"Error al extraer audio con FFmpeg: {e.stderr.decode()}")
-        return False
-    except FileNotFoundError:
-        print("Error: FFmpeg no encontrado. Asegúrate de que FFmpeg está instalado y en tu PATH.")
-        return False
-    except Exception as e:
-        print(f"Error inesperado durante la extracción de audio: {e}")
-        return False
-
-# --- NUEVA FUNCIÓN: Preprocesar audio (Extraer MFCCs) ---
-def preprocess_audio(audio_path, sr=AUDIO_SAMPLE_RATE, n_mfcc=AUDIO_MFCCS):
-    """
-    Carga un archivo de audio, extrae MFCCs y los prepara para un modelo de Keras.
-    """
-    try:
-        # Cargar audio
-        y, sr = librosa.load(audio_path, sr=sr)
-        
-        # Extraer MFCCs
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
-        
-        # Normalización y preparación para el modelo (esto puede variar según tu modelo de audio)
-        # Aquí, asumimos un modelo que espera una secuencia de MFCCs.
-        # Si tu modelo espera una imagen (e.g., Spectrograms), esta parte deberá cambiar.
-        # Para un modelo simple de clasificación, podríamos promediar o tomar la desviación estándar.
-        # Para modelos basados en secuencias (LSTMs, 1D CNNs), necesitarías una longitud fija.
-        
-        # Una forma simple para clasificación: promediar los MFCCs a lo largo del tiempo
-        mfccs_processed = np.mean(mfccs.T, axis=0) # Transponer para promediar a través de las columnas (tiempos)
-        
-        # Añadir dimensiones de batch y 'channels' si tu modelo lo espera (e.g., (1, features_dim))
-        mfccs_processed = np.expand_dims(mfccs_processed, axis=0) # Para batch_size
-        
-        return mfccs_processed
-    except Exception as e:
-        print(f"Error al preprocesar audio: {e}")
-        return None
-
-# --- NUEVA FUNCIÓN: Predecir emoción del audio ---
-def predict_audio_emotion(model, audio_features):
-    """
-    Realiza una predicción de emoción usando el modelo de audio.
-    """
-    try:
-        if audio_features is None:
-            return 0.5 # Valor por defecto si no hay features
-
-        pred = model.predict(audio_features, verbose=0)[0][0]
-        return pred
-    except Exception as e:
-        print(f"Error al realizar la predicción de audio: {e}. Devolviendo 0.5 por defecto.")
-        return 0.5 
-
-# --- Resto de funciones (sin cambios en la funcionalidad, solo se reubican) ---
+# --- Resto de funciones ---
 def detectar_rostros(frame):
     """
     Detecta rostros en un frame dado usando el clasificador de Haar.
@@ -175,6 +114,7 @@ def detectar_rostros(frame):
     
     boxes = []
     for (x, y, w, h) in faces:
+        # OpenCV devuelve (x, y, w, h). Queremos (top, right, bottom, left) para compatibilidad con el modelo.
         boxes.append((y, x + w, y + h, x)) 
     return boxes
 
@@ -185,6 +125,7 @@ def extraer_region_rostro(frame, box):
     top, right, bottom, left = box
     h_frame, w_frame, _ = frame.shape
     
+    # Asegura que las coordenadas estén dentro de los límites del frame
     top = max(0, top)
     right = min(w_frame, right)
     bottom = min(h_frame, bottom)
@@ -192,6 +133,7 @@ def extraer_region_rostro(frame, box):
 
     rostro = frame[top:bottom, left:right]
     
+    # Valida que la región extraída no esté vacía y tenga un tamaño mínimo
     if rostro.size == 0 or rostro.shape[0] < 10 or rostro.shape[1] < 10:
         return None
     
@@ -207,37 +149,39 @@ def extraer_region_rostro(frame, box):
 
 def preprocesar_imagen(img):
     """
-    Preprocesar una imagen de rostro para el modelo de Keras.
+    Preprocesa una imagen de rostro para el modelo de Keras.
     """
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # Keras modelos suelen esperar RGB
     img = img_to_array(img)
-    img = img / 255.0 
-    return np.expand_dims(img, axis=0) 
+    img = img / 255.0 # Normalización a 0-1
+    return np.expand_dims(img, axis=0) # Añade dimensión de batch
 
 def predecir_emocion(modelo, imagen_preprocesada):
     """
-    Realiza una predicción de emoción usando el modelo de video.
+    Realiza una predicción de emoción usando el modelo.
     """
     try:
         pred = modelo.predict(imagen_preprocesada, verbose=0)[0][0]
         return pred
     except Exception as e:
-        print(f"Error al realizar la predicción de video: {e}. Devolviendo 0.5 por defecto.")
-        return 0.5 
+        print(f"Error al realizar la predicción: {e}. Devolviendo 0.5 por defecto.")
+        return 0.5 # Valor por defecto en caso de error
 
 def dibujar_caja_y_texto(frame, box, texto, color=(255, 0, 0), thickness=2, font_scale=0.8):
     """
     Dibuja una bounding box y texto en un frame.
     """
     top, right, bottom, left = box
+    # Asegura que las coordenadas sean enteros
     top, right, bottom, left = int(top), int(right), int(bottom), int(left)
 
     cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
     
+    # Posiciona el texto por encima de la caja, si es posible
     text_size = cv2.getTextSize(texto, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
     text_x = left
     text_y = top - 10
-    if text_y < text_size[1]: 
+    if text_y < text_size[1]: # Si el texto se sale por arriba, ponlo dentro de la caja
         text_y = top + text_size[1] + 5
 
     cv2.putText(frame, texto, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
@@ -260,10 +204,10 @@ def graficar_predicciones(predicciones, titulo="Evolución de la Predicción"):
     ax.set_title(titulo)
     ax.set_xlabel("Número de Detección (orden cronológico)")
     ax.set_ylabel("Predicción de Predisposición (0-1)")
-    ax.set_ylim(-0.1, 1.1) 
+    ax.set_ylim(-0.1, 1.1) # Rango completo para la predicción
     ax.legend()
     ax.grid(True, linestyle=':', alpha=0.6)
-    plt.tight_layout() 
+    plt.tight_layout() # Ajusta el diseño para evitar superposiciones
     return fig
 
 def guardar_video(frames, path, fps=15):
@@ -276,6 +220,7 @@ def guardar_video(frames, path, fps=15):
         
     height, width, _ = frames[0].shape
     
+    # Código para video MP4
     fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
     out = cv2.VideoWriter(path, fourcc, fps, (width, height))
 
