@@ -1,7 +1,26 @@
-opencv-python
-numpy
-tensorflow
-streamlit
-pandas
-matplotlib
-ffmpeg-python
+# Core application framework
+streamlit==1.30.0  # Web application framework
+
+# Deep Learning Framework
+tensorflow==2.15.0 # Core TensorFlow library for Keras models (video and audio emotion prediction)
+tensorflow-hub==0.16.1 # Required for loading the YAMNet audio model from TensorFlow Hub
+
+# Video Processing
+opencv-python==4.9.0.80 # OpenCV library for video capture, frame processing, face detection, and drawing
+
+# Audio Processing
+librosa==0.10.1    # Library for audio analysis, loading, and resampling
+soundfile==0.12.1  # Required by librosa for reading/writing various audio formats (e.g., .wav)
+
+# Numerical Computing & Data Handling
+numpy==1.26.4      # Fundamental package for numerical operations (array manipulation)
+pandas==2.2.0      # Data manipulation and analysis (often a dependency for Streamlit's data display)
+matplotlib==3.8.3  # For plotting graphs and visualizations
+scikit-learn==1.4.0 # For the StandardScaler used in audio pre-processing (loaded via joblib)
+joblib==1.3.2      # Used for efficient loading of the pre-trained audio scaler (audio_scaler.npy)
+
+# Other utilities (implicitly used or good to have)
+# You might not need these if your environment is already robust, but they don't hurt.
+# They are often dependencies of the main packages listed above.
+# h5py==3.10.0       # Required for saving/loading Keras models (.h5 files)
+# pillow==10.2.0     # Image processing library, often used by TensorFlow/Keras and Streamlit

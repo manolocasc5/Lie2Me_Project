@@ -1,370 +1,489 @@
 import streamlit as st
 import cv2
 import numpy as np
-import tempfile
-import time
-import video_utils as vu 
 import tensorflow as tf
-import pandas as pd
 import os
-import subprocess 
+import tempfile
+from datetime import datetime
+import pandas as pd
+import math
+import matplotlib.pyplot as plt
+import subprocess # Necesario para la comprobación de FFmpeg
+
+# Importa el módulo video_utils
+# ESTA ES LA PRIMERA Y ÚNICA IMPORTACIÓN DE video_utils.py EN app.py
+import video_utils as vu
 
 # --- Configuración de la página de Streamlit ---
-st.set_page_config(page_title="Lie2Me - Emociones en tiempo real", layout="wide")
-st.title("🎭 Lie2Me - Detección de emociones y predisposición (Video + Audio)")
+st.set_page_config(layout="wide", page_title="Lie2Me - Detección de Predisposición")
 
-# --- Inicializar y verificar el clasificador de Haar (sin cambios) ---
-face_cascade_status_message, face_cascade_loaded_successfully = vu.init_face_cascade_classifier()
+st.title("Lie2Me - Detección de Predisposición (Vídeo + Audio)")
 
-if face_cascade_loaded_successfully:
-    st.sidebar.success(face_cascade_status_message)
-else:
-    st.sidebar.error(face_cascade_status_message)
-    st.stop() 
+# Carga de modelos y clasificadores
+# Se usa st.cache_resource para cargar los modelos solo una vez
+# ESTA FUNCIÓN load_resources() DEBE ESTAR EN app.py, NO EN video_utils.py
+@st.cache_resource
+def load_resources():
+    model_video = None
+    model_audio = None
 
-# --- Carga del modelo TensorFlow de VIDEO ---
-@st.cache_resource # Caché para no cargarlo cada vez
-def cargar_modelo_video():
     try:
-        model_path = "model/mobilenetv2_emotion_binario_finetune.h5"
-        if not os.path.exists(model_path):
-            st.error(f"Error: El archivo del modelo de vídeo no se encuentra en la ruta: {model_path}")
-            st.stop()
-        model = tf.keras.models.load_model(model_path)
-        return model
+        model_video = tf.keras.models.load_model("model/mobilenetv2_emotion_binario_finetune.h5")
+        st.success("✅ Modelo de vídeo cargado correctamente.")
     except Exception as e:
-        st.error(f"Error al cargar el modelo de vídeo de TensorFlow: {e}")
-        st.stop()
+        st.error(f"❌ Error al cargar el modelo de vídeo: {e}. Asegúrate de que 'model/mobilenetv2_emotion_binario_finetune.h5' existe y es válido.")
+        model_video = None
 
-model_video = cargar_modelo_video()
-
-# --- ¡NUEVO! Carga del modelo TensorFlow de AUDIO ---
-@st.cache_resource # Caché para no cargarlo cada vez
-def cargar_modelo_audio():
     try:
-        # ¡IMPORTANTE! Reemplaza esto con la ruta a TU modelo de audio real.
-        audio_model_path = "model/audio_emotion_model.h5" 
-        if not os.path.exists(audio_model_path):
-            st.warning(f"Advertencia: El archivo del modelo de audio no se encuentra en la ruta: {audio_model_path}. La predicción de audio no estará disponible.")
-            return None # Retorna None si no se encuentra
-        model = tf.keras.models.load_model(audio_model_path)
-        return model
+        model_audio = tf.keras.models.load_model("model/audio_emotion_model.h5")
+        st.success("✅ Modelo de audio cargado correctamente.")
     except Exception as e:
-        st.warning(f"Error al cargar el modelo de audio de TensorFlow: {e}. La predicción de audio no estará disponible. Asegúrate de que el modelo es compatible.")
-        return None
-
-model_audio = cargar_modelo_audio()
-if model_audio:
-    st.sidebar.success("Modelo de audio cargado correctamente.")
-else:
-    st.sidebar.info("Modelo de audio no disponible. Las predicciones se realizarán solo por vídeo.")
-
-
-# --- Variables para almacenar resultados globales ---
-predicciones_video_totales = [] # Lista de predicciones del vídeo por cada detección facial
-prediccion_audio_final = None   # Predicción única del audio de todo el vídeo
-predicciones_finales_fusionadas = [] # Predicción combinada (una para vídeos subidos)
-frames_procesados_para_guardar = []
-
-# --- Sidebar: Selección de la fuente de vídeo ---
-fuente = st.sidebar.radio("Selecciona la fuente de vídeo:", ("Cámara en vivo", "Subir vídeo"))
-
-# --- ¡NUEVO! Control de ponderación en la sidebar ---
-st.sidebar.markdown("---")
-st.sidebar.header("Ponderación de Predicciones")
-# Solo muestra los sliders si el modelo de audio está cargado
-if model_audio:
-    peso_video = st.sidebar.slider("Peso de la Predicción por Vídeo", 0.0, 1.0, 0.7, 0.05)
-    peso_audio = st.sidebar.slider("Peso de la Predicción por Audio", 0.0, 1.0, 0.3, 0.05)
+        st.error(f"❌ Error al cargar el modelo de audio: {e}. Asegúrate de que 'model/audio_emotion_model.h5' existe y es válido.")
+        model_audio = None
     
-    # Normalizar pesos para que sumen 1 (siempre)
-    total_pesos = peso_video + peso_audio
-    if total_pesos > 0:
-        peso_video_normalizado = peso_video / total_pesos
-        peso_audio_normalizado = peso_audio / total_pesos
-    else: 
-        # Si ambos sliders están a 0, damos un valor por defecto para evitar división por cero
-        peso_video_normalizado = 0.5
-        peso_audio_normalizado = 0.5
-    
-    st.sidebar.info(f"Pesos normalizados: Vídeo={peso_video_normalizado:.2f}, Audio={peso_audio_normalizado:.2f}")
-else:
-    st.sidebar.info("La ponderación del audio está deshabilitada ya que el modelo de audio no fue cargado.")
-    peso_video_normalizado = 1.0 # Si no hay audio, el vídeo tiene todo el peso
-    peso_audio_normalizado = 0.0
+    # Inicializar el clasificador de Haar usando la función de video_utils
+    status_haar, success_haar = vu.init_face_cascade_classifier()
+    if success_haar:
+        st.success(f"✅ {status_haar}")
+    else:
+        st.error(f"❌ {status_haar}")
 
-# --- Función para procesar un solo frame (predicción de vídeo) ---
-# Se le pasa el modelo de vídeo ahora
-def procesar_frame(frame_input, video_model):
-    boxes = vu.detectar_rostros(frame_input)
-    preds_en_frame = []
+    # YAMNet y el escalador de audio se inicializan globalmente en video_utils
+    # Aquí solo verificamos si se cargaron correctamente al importar vu
+    if vu.YAMNET_MODEL is None or vu.audio_scaler is None:
+        st.warning("⚠️ El modelo YAMNet o el escalador de audio no se cargaron correctamente. El análisis de audio puede ser inexacto o no realizarse.")
+    else:
+        st.success("✅ YAMNet y escalador de audio cargados.")
 
-    for box in boxes:
-        rostro = vu.extraer_region_rostro(frame_input, box)
-        if rostro is not None:
-            img_proc = vu.preprocesar_imagen(rostro)
-            pred = vu.predecir_emocion(video_model, img_proc) # Usamos el modelo de vídeo
-            preds_en_frame.append(pred)
-            
-            texto = f"Predispuesto ({pred:.2f})" if pred > 0.5 else f"No predispuesto ({pred:.2f})"
-            color = (0, 255, 0) if pred > 0.5 else (0, 0, 255)
+    return model_video, model_audio
 
-            vu.dibujar_caja_y_texto(frame_input, box, texto, color=color)
-        else:
-            preds_en_frame.append(None)
-    return frame_input, boxes, preds_en_frame
+# Cargar los recursos al inicio de la aplicación
+model_video, model_audio = load_resources()
 
-# --- Lógica principal basada en la fuente de vídeo ---
+# Inicializar estados de sesión si no existen
+if 'predicciones_video_list' not in st.session_state:
+    st.session_state.predicciones_video_list = []
+if 'predicciones_audio_list' not in st.session_state:
+    st.session_state.predicciones_audio_list = []
+if 'frames_procesados_para_guardar' not in st.session_state:
+    st.session_state.frames_procesados_para_guardar = []
+if 'fps_video_original' not in st.session_state:
+    st.session_state.fps_video_original = 30 # Valor por defecto
+if 'predicciones_finales_fusionadas' not in st.session_state:
+    st.session_state.predicciones_finales_fusionadas = []
+if 'predicciones_video_resampled' not in st.session_state:
+    st.session_state.predicciones_video_resampled = []
+if 'predicciones_audio_resampled' not in st.session_state:
+    st.session_state.predicciones_audio_resampled = []
+if 'temp_audio_path' not in st.session_state:
+    st.session_state.temp_audio_path = None
+if 'model_audio_loaded' not in st.session_state:
+    # Esta bandera indica si el análisis de audio es *potencialmente* posible
+    st.session_state.model_audio_loaded = (model_audio is not None and vu.YAMNET_MODEL is not None and vu.audio_scaler is not None)
+
+
+# Contenedor para el frame de vídeo o mensaje de procesamiento
 stframe = st.empty()
 
+# Opciones de fuente de vídeo en la barra lateral
+st.sidebar.header("Configuración de Entrada")
+fuente = st.sidebar.radio("Selecciona la fuente de vídeo:", ("Cámara en vivo", "Subir vídeo"), index=1)
+
+# Sliders para ponderar las predicciones
+st.sidebar.header("Ponderación de Predicciones")
+video_weight = st.sidebar.slider("Peso de la Predicción por Vídeo", 0.0, 1.0, 0.7, 0.05)
+audio_weight = st.sidebar.slider("Peso de la Predicción por Audio", 0.0, 1.0, 0.3, 0.05)
+
+total_weight = video_weight + audio_weight
+if total_weight > 0:
+    video_weight /= total_weight
+    audio_weight /= total_weight
+else:
+    # Asegurar valores por defecto si la suma es 0
+    video_weight = 0.5
+    audio_weight = 0.5
+
+st.sidebar.write(f"Pesos normalizados: Vídeo={video_weight:.2f}, Audio={audio_weight:.2f}")
+
+# --- Lógica principal basada en la fuente de vídeo ---
 if fuente == "Cámara en vivo":
-    st.warning("La predicción de audio no es compatible con la cámara en vivo en esta versión. Se realizará solo la predicción por vídeo.")
-    st.write("🎥 Capturando desde cámara por 5 segundos...")
-    cap = cv2.VideoCapture(0)
-    
-    if not cap.isOpened():
-        st.error("Error: No se pudo acceder a la cámara. Asegúrate de que esté conectada y no esté en uso por otra aplicación.")
-        st.stop()
+    st.warning("⚠️ La funcionalidad de cámara en vivo está en desarrollo y podría no funcionar en todos los entornos de navegador/servidor.")
+    st.info("💡 Para capturar la cámara, asegúrate de que tu navegador tiene permisos de acceso a la cámara.")
+    st.info("❗ Nota: El análisis de audio no está disponible para la cámara en vivo en esta versión.")
 
-    start_time = time.time()
-    duration = 5
-    
-    while time.time() - start_time < duration:
-        ret, frame = cap.read()
-        if not ret:
-            st.warning("No se pudo leer el frame desde la cámara. Intentando de nuevo...")
-            time.sleep(0.1)
-            continue
+    run_camera = st.checkbox("▶️ Activar Cámara", key="camera_activation_checkbox")
 
-        processed_frame, current_boxes, current_preds = procesar_frame(frame, model_video)
-        predicciones_video_totales.extend([p for p in current_preds if p is not None])
-        frames_procesados_para_guardar.append(processed_frame.copy())
+    cap = None
+    if run_camera:
+        if not model_video:
+            st.error("❌ El modelo de vídeo no se cargó. No se puede realizar el análisis de vídeo en vivo.")
+            # Desactivar el checkbox de la cámara automáticamente si el modelo no está listo
+            st.session_state.camera_activation_checkbox = False 
+            st.stop() # Detiene la ejecución aquí si el modelo no está listo
 
-        frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-        stframe.image(frame_rgb, channels="RGB")
-
-    cap.release()
-    # Para la cámara en vivo, la predicción combinada es simplemente la de vídeo
-    predicciones_finales_fusionadas = predicciones_video_totales
-
-
-elif fuente == "Subir video":
-    uploaded_file = st.file_uploader("Sube un archivo de vídeo", type=["mp4", "avi", "mov"])
-    
-    if uploaded_file is not None:
-        # 1. Guardar el archivo subido en un archivo temporal
-        original_video_path = ""
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tfile:
-            tfile.write(uploaded_file.read())
-            original_video_path = tfile.name
-
-        # 2. Determinar la ruta para el vídeo pre-procesado (rotación)
-        processed_video_path = original_video_path.replace(".mp4", "_processed.mp4")
-        if not processed_video_path.endswith(".mp4"):
-            processed_video_path = processed_video_path + ".mp4"
-            
-        st.info("Detectando y corrigiendo la orientación del vídeo (si es necesario)...")
-        
-        ffmpeg_command = [
-            "ffmpeg",
-            "-i", original_video_path,
-            "-vf", "transpose=2,transpose=2,transpose=1,transpose=1", 
-            "-c:v", "libx264", 
-            "-preset", "fast", 
-            "-crf", "23", 
-            "-c:a", "aac", 
-            "-b:a", "128k", 
-            "-y", 
-            processed_video_path
-        ]
-        
         try:
-            subprocess.run(ffmpeg_command, capture_output=True, text=True, check=True)
-            st.success("Vídeo pre-procesado para corregir orientación.")
-        except subprocess.CalledProcessError as e:
-            st.error(f"Error al pre-procesar el vídeo con FFmpeg: {e.stderr}")
-            st.warning("Intentando procesar el vídeo original sin corrección de rotación. Podría aparecer invertido.")
-            processed_video_path = original_video_path 
-        except FileNotFoundError:
-            st.error("Error: FFmpeg no encontrado. Asegúrate de que FFmpeg está instalado y en tu PATH.")
-            st.warning("Intentando procesar el vídeo original sin corrección de rotación. Podría aparecer invertido.")
-            processed_video_path = original_video_path 
+            cap = cv2.VideoCapture(0) # Intenta abrir la cámara
+            if not cap.isOpened():
+                st.error("❌ No se pudo acceder a la cámara. Asegúrate de que no esté en uso por otra aplicación y de que los permisos son correctos.")
+                cap = None
         except Exception as e:
-            st.error(f"Error inesperado durante el pre-procesamiento: {e}")
-            st.warning("Intentando procesar el vídeo original sin corrección de rotación. Podría aparecer invertido.")
-            processed_video_path = original_video_path 
+            st.error(f"❌ Error al inicializar la cámara: {e}")
+            cap = None
 
-        # --- ¡NUEVO! Procesamiento de Audio ---
-        audio_output_path = original_video_path.replace(".mp4", ".wav")
-        if model_audio: # Solo si se cargó el modelo de audio
-            st.info("Extrayendo y procesando audio...")
-            if vu.extract_audio_from_video(original_video_path, audio_output_path):
-                audio_features = vu.preprocess_audio(audio_output_path)
-                if audio_features is not None:
-                    prediccion_audio_final = vu.predict_audio_emotion(model_audio, audio_features)
-                    st.success(f"Predicción de Audio: {prediccion_audio_final:.2f}")
+        if cap:
+            st.session_state.fps_video_original = cap.get(cv2.CAP_PROP_FPS)
+            if st.session_state.fps_video_original <= 0:
+                st.session_state.fps_video_original = 30 # Fallback si no se obtiene un FPS válido
+
+            # Reiniciar listas para nueva ejecución
+            st.session_state.predicciones_video_list = []
+            st.session_state.predicciones_audio_list = [] # Siempre vacía para cámara en vivo
+            st.session_state.frames_procesados_para_guardar = []
+            st.session_state.predicciones_finales_fusionadas = []
+            st.session_state.predicciones_video_resampled = []
+            st.session_state.predicciones_audio_resampled = []
+            st.session_state.temp_audio_path = None
+
+            frame_count = 0
+            # --- PARÁMETROS PARA LA CÁMARA EN VIVO ---
+            CAPTURA_SEGUNDOS_CAM = 10 # Define cuántos segundos quieres capturar
+            MAX_FRAMES_CAPTURA_CAM = int(st.session_state.fps_video_original * CAPTURA_SEGUNDOS_CAM)
+            
+            st_camera_status = st.empty()
+            st_camera_status.info(f"⏳ Capturando y procesando vídeo de la cámara en vivo por {CAPTURA_SEGUNDOS_CAM} segundos...")
+
+            try:
+                # Bucle de captura con límite de frames
+                while run_camera and frame_count < MAX_FRAMES_CAPTURA_CAM:
+                    ret, frame = cap.read()
+                    if not ret:
+                        st.warning("⚠️ No se pudieron leer más frames de la cámara.")
+                        break
+                    
+                    # Puedes ajustar display_width a tu preferencia (ej. 640, 480, 320).
+                    # Cuanto menor sea, más rápido y pequeño se verá.
+                    display_width = 640 # Ancho deseado para la visualización y procesamiento
+                    
+                    # Calcula la altura manteniendo la relación de aspecto original
+                    # Asegúrate de que frame.shape[1] (ancho original) no sea cero para evitar división por cero
+                    if frame.shape[1] == 0:
+                        st.warning("El ancho del frame de la cámara es cero. Omitiendo redimensionamiento.")
+                        resized_frame = frame
+                    else:
+                        display_height = int(frame.shape[0] * (display_width / frame.shape[1]))
+                        # Asegurarse de que las dimensiones resultantes sean válidas (positivas)
+                        if display_width <= 0 or display_height <= 0:
+                            st.warning("Dimensiones de frame inválidas después de redimensionar. Omitiendo frame.")
+                            continue # Saltar al siguiente frame
+                        resized_frame = cv2.resize(frame, (display_width, display_height))
+                    
+                    
+                    prediccion_video, frame_con_deteccion = vu.preprocesar_y_predecir_video(resized_frame, model_video)
+                    if prediccion_video is not None:
+                        st.session_state.predicciones_video_list.append(prediccion_video)
+                        st.session_state.frames_procesados_para_guardar.append(frame_con_deteccion)
+
+                    stframe.image(frame_con_deteccion, channels="BGR")
+                    frame_count += 1
+                    st_camera_status.text(f"📸 Capturando... Frame {frame_count}/{MAX_FRAMES_CAPTURA_CAM}")
+
+            finally:
+                if cap:
+                    cap.release()
+                st_camera_status.empty() # Limpia el mensaje de captura
+                st.info("✅ Cámara detenida. Calculando resultados de vídeo...")
+                
+                if st.session_state.predicciones_video_list:
+                    # Para la cámara en vivo, las predicciones de audio son una lista vacía
+                    (st.session_state.predicciones_finales_fusionadas,
+                     st.session_state.predicciones_video_resampled,
+                     st.session_state.predicciones_audio_resampled) = vu.fusionar_predicciones(
+                        st.session_state.predicciones_video_list,
+                        [], # Se pasa una lista vacía para audio
+                        video_weight,
+                        audio_weight
+                    )
+                    st.success("✅ Análisis completado para vídeo en vivo!")
                 else:
-                    st.warning("No se pudieron extraer características de audio válidas.")
-            else:
-                st.warning("No se pudo extraer el audio del vídeo. La predicción de audio no estará disponible.")
+                    st.warning("⚠️ No se capturaron suficientes frames o no se detectaron caras para el análisis de vídeo.")
         else:
-            st.info("El modelo de audio no está cargado, se omitirá el procesamiento de audio.")
+            st.info("Por favor, haz clic en '▶️ Activar Cámara' para iniciar la captura.")
 
-        # 3. Abrir el vídeo PROCESADO (o el original si hubo error)
-        cap = cv2.VideoCapture(processed_video_path)
-        
+
+elif fuente == "Subir vídeo":
+    uploaded_file = st.file_uploader("📂 Sube un archivo de vídeo", type=["mp4", "avi", "mov"])
+
+    if uploaded_file is not None:
+        if not model_video:
+            st.error("❌ El modelo de vídeo no se cargó. No se puede realizar el análisis de vídeo.")
+            st.stop()
+        if not st.session_state.model_audio_loaded and audio_weight > 0:
+            st.warning("⚠️ El modelo de audio o sus dependencias no se cargaron correctamente. Las predicciones se basarán solo en el vídeo.")
+
+        # Reiniciar listas para nueva ejecución
+        st.session_state.predicciones_video_list = []
+        st.session_state.predicciones_audio_list = []
+        st.session_state.frames_procesados_para_guardar = []
+        st.session_state.predicciones_finales_fusionadas = []
+        st.session_state.predicciones_video_resampled = []
+        st.session_state.predicciones_audio_resampled = []
+        st.session_state.temp_audio_path = None
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video_file:
+            temp_video_file.write(uploaded_file.read())
+            temp_video_path = temp_video_file.name
+
+        cap = cv2.VideoCapture(temp_video_path)
+
         if not cap.isOpened():
-            st.error(f"Error: No se pudo abrir el archivo de vídeo: {os.path.basename(processed_video_path)}. ¿Es un archivo de vídeo válido después del procesamiento?")
-            # Limpiar archivos temporales
-            if os.path.exists(original_video_path): os.unlink(original_video_path)
-            if os.path.exists(processed_video_path): os.unlink(processed_video_path)
-            if os.path.exists(audio_output_path): os.unlink(audio_output_path) # Limpiar audio temporal
+            st.error("❌ Error al abrir el archivo de vídeo. Asegúrate de que es un formato compatible y no está corrupto.")
+            os.unlink(temp_video_path)
             st.stop()
 
-        MAX_FRAME_WIDTH = 800 
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        st.session_state.fps_video_original = cap.get(cv2.CAP_PROP_FPS)
+        if st.session_state.fps_video_original <= 0: # Fallback
+            st.session_state.fps_video_original = 30
 
         progress_bar = st.progress(0)
+        st_status_text = st.empty()
+
+        # Paso de extracción de audio
+        st_status_text.info("🎵 Extrayendo audio del vídeo... (Esto puede tardar unos segundos)")
+        st.session_state.temp_audio_path = tempfile.NamedTemporaryFile(delete=False, suffix='.wav').name
+        try:
+            vu.extraer_audio_ffmpeg(temp_video_path, st.session_state.temp_audio_path)
+            st_status_text.success("✅ Audio extraído correctamente.")
+        except Exception as e:
+            st_status_text.error(f"❌ Error al extraer audio: {e}. Asegúrate de que FFmpeg está instalado y accesible en tu PATH. El análisis de audio será omitido.")
+            if os.path.exists(st.session_state.temp_audio_path):
+                os.unlink(st.session_state.temp_audio_path)
+            st.session_state.temp_audio_path = None # Indicar que no hay audio temporal
+            st.session_state.predicciones_audio_list = [] # Asegurarse de que esté vacía
+
+
+        # Paso de procesamiento de vídeo
+        st_status_text.info("🎥 Procesando frames de vídeo para detección facial y emocional...")
         frame_count = 0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames == 0: 
-            st.warning("El vídeo parece estar vacío o corrupto (0 frames) después del procesamiento.")
-            cap.release()
-            if os.path.exists(original_video_path): os.unlink(original_video_path)
-            if os.path.exists(processed_video_path): os.unlink(processed_video_path)
-            if os.path.exists(audio_output_path): os.unlink(audio_output_path)
-            st.stop()
-
-        st.write(f"Procesando vídeo: {total_frames} frames...")
-
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            
-            current_height, current_width, _ = frame.shape
-            if current_width > MAX_FRAME_WIDTH:
-                new_width = MAX_FRAME_WIDTH
-                new_height = int(current_height * (MAX_FRAME_WIDTH / current_width))
-                frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
 
-            processed_frame, current_boxes, current_preds = procesar_frame(frame, model_video)
-            predicciones_video_totales.extend([p for p in current_preds if p is not None])
-            frames_procesados_para_guardar.append(processed_frame.copy())
-
-            frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-            stframe.image(frame_rgb, channels="RGB")
+            prediccion_video, frame_con_deteccion = vu.preprocesar_y_predecir_video(frame, model_video)
+            if prediccion_video is not None:
+                st.session_state.predicciones_video_list.append(prediccion_video)
+                st.session_state.frames_procesados_para_guardar.append(frame_con_deteccion)
 
             frame_count += 1
-            progress_bar.progress(min(100, int((frame_count / total_frames) * 100)))
+            progress = min(int((frame_count / total_frames) * 100), 100)
+            progress_bar.progress(progress)
+            st_status_text.text(f"Procesando frame {frame_count}/{total_frames} (Vídeo)...")
 
         cap.release()
-        # Eliminar archivos temporales al finalizar
-        if os.path.exists(original_video_path): os.unlink(original_video_path)
-        if os.path.exists(processed_video_path): os.unlink(processed_video_path)
-        if os.path.exists(audio_output_path): os.unlink(audio_output_path) # Limpiar audio temporal
+        os.unlink(temp_video_path)
+        st_status_text.success("✅ Análisis de vídeo completado.")
 
-        # --- ¡NUEVO! Fusión de Predicciones ---
-        if predicciones_video_totales and prediccion_audio_final is not None:
-            st.markdown("---")
-            st.header("Combinando Predicciones de Vídeo y Audio")
-            
-            # Calculamos el promedio de todas las predicciones de vídeo
-            promedio_pred_video = np.mean(predicciones_video_totales)
-            st.write(f"Promedio de Predicciones de Vídeo: **{promedio_pred_video:.2f}**")
-            st.write(f"Predicción de Audio: **{prediccion_audio_final:.2f}**")
-
-            # Aplicamos la fusión ponderada
-            prediccion_fusionada = (promedio_pred_video * peso_video_normalizado) + \
-                                   (prediccion_audio_final * peso_audio_normalizado)
-            
-            st.success(f"**Predicción Final Combinada (Vídeo x{peso_video_normalizado:.2f} + Audio x{peso_audio_normalizado:.2f}): {prediccion_fusionada:.2f}**")
-            predicciones_finales_fusionadas.append(prediccion_fusionada) # Guardamos la predicción final
-
-        elif predicciones_video_totales:
-            st.warning("Solo se procesó la predicción de vídeo (no hay audio o el modelo de audio no se cargó).")
-            # Si solo hay predicciones de vídeo, estas serán las "finales"
-            predicciones_finales_fusionadas = predicciones_video_totales
-        elif prediccion_audio_final is not None:
-            st.warning("Solo se procesó la predicción de audio (no hay vídeo o detección de rostros).")
-            # Si solo hay predicción de audio, esa será la "final"
-            predicciones_finales_fusionadas.append(prediccion_audio_final)
-
-# --- Sección de resultados y descargas (adaptada para usar las predicciones fusionadas) ---
-if predicciones_finales_fusionadas:
-    st.markdown("---")
-    st.header("📊 Resultados del Análisis")
-
-    # Contamos las predicciones por encima y por debajo del umbral de 0.5
-    count_pos = sum(1 for p in predicciones_finales_fusionadas if p is not None and p > 0.5)
-    count_neg = sum(1 for p in predicciones_finales_fusionadas if p is not None and p <= 0.5)
-    
-    total_preds_validas = len([p for p in predicciones_finales_fusionadas if p is not None])
-
-    st.write(f"✅ **Detecciones Predispuestas:** {count_pos} de {total_preds_validas}")
-    st.write(f"❌ **Detecciones No Predispuestas:** {count_neg} de {total_preds_validas}")
-
-    if total_preds_validas > 0:
-        # La conclusión principal se basa en el promedio o el único resultado fusionado
-        if len(predicciones_finales_fusionadas) == 1 and fuente == "Subir video":
-            final_pred_value = predicciones_finales_fusionadas[0]
-            if final_pred_value > 0.5:
-                st.success("✅ **Conclusión Final (Vídeo + Audio):** Se detecta una **predisposición a repetir la experiencia**.")
+        # Paso de procesamiento de audio (solo si el modelo y el audio temporal están disponibles)
+        if st.session_state.model_audio_loaded and st.session_state.temp_audio_path and os.path.exists(st.session_state.temp_audio_path):
+            st_status_text.info("🎙️ Analizando audio del vídeo...")
+            st.session_state.predicciones_audio_list = vu.preprocesar_y_predecir_audio(st.session_state.temp_audio_path, model_audio, vu.YAMNET_MODEL, vu.audio_scaler)
+            if st.session_state.predicciones_audio_list is None or not st.session_state.predicciones_audio_list:
+                st.session_state.predicciones_audio_list = [] # Asegurar que es una lista vacía si falla
+                st.warning("⚠️ No se pudieron obtener predicciones de audio válidas (audio demasiado corto o problema en el procesamiento).")
             else:
-                st.error("❌ **Conclusión Final (Vídeo + Audio):** Se detecta **no predisposición a repetir la experiencia**.")
-        else: # Para cámara en vivo o cuando solo hay predicciones de vídeo
-            if count_pos > count_neg:
-                st.success("✅ **Conclusión:** La mayoría de las detecciones indican una **predisposición a repetir la experiencia**.")
-            elif count_neg > count_pos:
-                st.error("❌ **Conclusión:** La mayoría de las detecciones indican **no predisposición a repetir la experiencia**.")
-            else:
-                st.info("ℹ️ **Conclusión:** Las detecciones de predisposición y no predisposición están equilibradas.")
-    else:
-        st.warning("No se pudieron obtener predicciones válidas para la conclusión.")
+                st.success("✅ Análisis de audio completado.")
+        else:
+            st.info("ℹ️ Análisis de audio omitido (modelo de audio no cargado o archivo de audio no disponible/válido).")
+            st.session_state.predicciones_audio_list = [] # Asegurar que esté vacía si se omite
 
-    if predicciones_video_totales: # Mostramos la gráfica de vídeo si hay datos
-        fig_video = vu.graficar_predicciones(predicciones_video_totales, titulo="Evolución de la Predisposición por Vídeo")
-        st.pyplot(fig_video)
-    
-    # Si hay una predicción fusionada (para vídeos subidos), la mostramos de forma destacada
-    if len(predicciones_finales_fusionadas) == 1 and fuente == "Subir video":
-        st.markdown("---")
-        st.subheader("Predicción Final Combinada")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric(label="Predicción Final", value=f"{predicciones_finales_fusionadas[0]:.2f}")
-        with col2:
-            if predicciones_finales_fusionadas[0] > 0.5:
-                st.success("Resultado: Predispuesto")
-            else:
-                st.error("Resultado: No Predispuesto")
 
-    # CSV de predicciones (ahora incluye las columnas de audio y fusionada si aplican)
-    if predicciones_video_totales:
-        df_preds_dict = {
-            "id_deteccion": list(range(len(predicciones_video_totales))),
-            "prediccion_video_raw": predicciones_video_totales,
-            "predisposicion_video": ["Predispuesto" if p > 0.5 else "No predispuesto" for p in predicciones_video_totales]
-        }
-        
-        if prediccion_audio_final is not None:
-            # Repetimos la predicción de audio para cada detección de vídeo para que el DataFrame tenga la misma longitud
-            df_preds_dict["prediccion_audio_raw"] = [prediccion_audio_final] * len(predicciones_video_totales) 
-            df_preds_dict["predisposicion_audio"] = ["Predispuesto" if prediccion_audio_final > 0.5 else "No predispuesto"] * len(predicciones_video_totales)
-            
-            # La predicción fusionada también se repite, ya que es un valor único para todo el vídeo
-            df_preds_dict["prediccion_fusionada_raw"] = [predicciones_finales_fusionadas[0]] * len(predicciones_video_totales) if predicciones_finales_fusionadas else [0.0] * len(predicciones_video_totales)
-            df_preds_dict["predisposicion_fusionada"] = ["Predispuesto" if p > 0.5 else "No predispuesto" for p in df_preds_dict["prediccion_fusionada_raw"]]
-
-        df_preds = pd.DataFrame(df_preds_dict)
-        csv = df_preds.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="⬇️ Descargar predicciones CSV",
-            data=csv,
-            file_name="predicciones_lie2me.csv",
-            mime="text/csv"
+        # Fusión de resultados
+        st_status_text.info("✨ Fusionando resultados de vídeo y audio...")
+        (st.session_state.predicciones_finales_fusionadas,
+         st.session_state.predicciones_video_resampled,
+         st.session_state.predicciones_audio_resampled) = vu.fusionar_predicciones(
+            st.session_state.predicciones_video_list,
+            st.session_state.predicciones_audio_list,
+            video_weight,
+            audio_weight
         )
+        progress_bar.empty()
+        st_status_text.empty()
+        st.success("✅ Análisis completado!")
 
-    # ... (El resto del código para guardar el vídeo anotado permanece igual) ...
+        # Limpiar archivo de audio temporal
+        if st.session_state.temp_audio_path and os.path.exists(st.session_state.temp_audio_path):
+            os.unlink(st.session_state.temp_audio_path)
+            st.session_state.temp_audio_path = None
 
+
+# --- Mostrar resultados y gráficos si hay predicciones ---
+def mostrar_resultados():
+    predicciones_finales_fusionadas = st.session_state.predicciones_finales_fusionadas
+    predicciones_video_resampled = st.session_state.predicciones_video_resampled
+    predicciones_audio_resampled = st.session_state.predicciones_audio_resampled
+
+    if predicciones_finales_fusionadas:
+        st.subheader("📊 Resultados del Análisis de Predisposición")
+
+        # Predicción general fusionada
+        prediccion_promedio_fusionada = np.mean(predicciones_finales_fusionadas) if predicciones_finales_fusionadas else 0
+        col1, col2 = st.columns([1, 2]) # Ajustar proporciones de columna
+        with col1:
+            st.markdown("#### Predicción Global (Fusión)")
+            if prediccion_promedio_fusionada > 0.5:
+                st.success(f"**Predisposición Detectada:** {prediccion_promedio_fusionada:.2f}")
+                st.balloons()
+            else:
+                st.error(f"**No Predisposición Detectada:** {prediccion_promedio_fusionada:.2f}")
+
+        # Gráfico de evolución temporal de la predisposición (Fusión)
+        with col2:
+            st.markdown("#### Evolución de la Probabilidad de Predisposición (Fusión)")
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(predicciones_finales_fusionadas, label='Probabilidad (Fusión)', color='purple', linewidth=2)
+            ax.axhline(0.5, color='r', linestyle='--', label='Umbral (0.5)')
+            ax.set_xlabel('Segmento de Tiempo')
+            ax.set_ylabel('Probabilidad')
+            ax.set_title('Evolución Temporal de la Predisposición (Fusión)')
+            ax.legend()
+            ax.grid(True)
+            st.pyplot(fig)
+        
+        st.markdown("---") # Separador visual
+
+        # Sección para predicciones de VÍDEO
+        st.subheader("Componente de Análisis por Vídeo")
+        if predicciones_video_resampled:
+            prediccion_promedio_video = np.mean(st.session_state.predicciones_video_list) if st.session_state.predicciones_video_list else 0
+            st.info(f"Probabilidad de predisposición promedio por **Vídeo**: **{prediccion_promedio_video:.2f}**")
+            
+            fig_video, ax_video = plt.subplots(figsize=(10, 3))
+            ax_video.plot(predicciones_video_resampled, label='Probabilidad (Vídeo)', color='blue')
+            ax_video.axhline(0.5, color='r', linestyle='--', label='Umbral (0.5)')
+            ax_video.set_xlabel('Segmento de Tiempo')
+            ax_video.set_ylabel('Probabilidad')
+            ax_video.set_title('Evolución Temporal de la Predisposición (Vídeo)')
+            ax_video.legend()
+            ax_video.grid(True)
+            st.pyplot(fig_video)
+        else:
+            st.warning("⚠️ No se obtuvieron predicciones de vídeo (posiblemente no se detectaron caras o el vídeo es muy corto).")
+
+
+        # Sección para predicciones de AUDIO
+        st.subheader("Componente de Análisis por Audio")
+        if st.session_state.model_audio_loaded and predicciones_audio_resampled:
+            prediccion_promedio_audio = np.mean(st.session_state.predicciones_audio_list) if st.session_state.predicciones_audio_list else 0
+            st.info(f"Probabilidad de predisposición promedio por **Audio**: **{prediccion_promedio_audio:.2f}**")
+
+            fig_audio, ax_audio = plt.subplots(figsize=(10, 3))
+            ax_audio.plot(predicciones_audio_resampled, label='Probabilidad (Audio)', color='green')
+            ax_audio.axhline(0.5, color='r', linestyle='--', label='Umbral (0.5)')
+            ax_audio.set_xlabel('Segmento de Tiempo')
+            ax_audio.set_ylabel('Probabilidad')
+            ax_audio.set_title('Evolución Temporal de la Predisposición (Audio)')
+            ax_audio.legend()
+            ax_audio.grid(True)
+            st.pyplot(fig_audio)
+        else:
+            if not st.session_state.model_audio_loaded:
+                st.error("❌ El modelo de audio o sus dependencias no se pudieron cargar. No se realizaron predicciones de audio.")
+            else:
+                st.warning("⚠️ No se obtuvieron predicciones de audio válidas (posiblemente el audio es muy corto o el formato no es compatible).")
+        
+        st.markdown("---") # Separador visual
+
+        # Gráfico Comparativo Final
+        if predicciones_video_resampled or predicciones_audio_resampled:
+            st.subheader("📈 Comparativa de Predicciones (Vídeo, Audio y Fusión)")
+            fig_comp, ax_comp = plt.subplots(figsize=(12, 6))
+            
+            if predicciones_video_resampled:
+                ax_comp.plot(predicciones_video_resampled, label='Predicción Vídeo (Remuestreada)', color='blue', alpha=0.7)
+            if predicciones_audio_resampled:
+                ax_comp.plot(predicciones_audio_resampled, label='Predicción Audio (Remuestreada)', color='green', alpha=0.7)
+            
+            ax_comp.plot(predicciones_finales_fusionadas, label='Predicción Fusionada', color='purple', linewidth=2)
+            ax_comp.axhline(0.5, color='r', linestyle='--', label='Umbral (0.5)')
+            ax_comp.set_xlabel('Segmento de Tiempo (Base de remuestreo)')
+            ax_comp.set_ylabel('Probabilidad')
+            ax_comp.set_title('Comparativa de Predicciones de Predisposición')
+            ax_comp.legend()
+            ax_comp.grid(True)
+            st.pyplot(fig_comp)
+
+
+        # Ofrecer guardar el vídeo procesado con detecciones faciales
+        if st.session_state.frames_procesados_para_guardar:
+            st.markdown("---") # Separador visual
+            st.subheader("Guardar Vídeo Procesado")
+            if st.button("⬇️ Guardar y Descargar Vídeo Procesado"):
+                output_video_filename = f"video_procesado_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+                temp_output_path = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4').name
+
+                try:
+                    with st.spinner("⏳ Generando vídeo procesado... Esto puede tardar unos minutos para vídeos largos."):
+                        vu.guardar_frames_como_video(st.session_state.frames_procesados_para_guardar, temp_output_path, int(st.session_state.fps_video_original))
+                    
+                    with open(temp_output_path, "rb") as file:
+                        st.download_button(
+                            label="Haz clic para descargar el vídeo",
+                            data=file.read(),
+                            file_name=output_video_filename,
+                            mime="video/mp4"
+                        )
+                    st.success(f"✅ Vídeo guardado exitosamente en: {output_video_filename}")
+                    os.unlink(temp_output_path) # Limpiar archivo temporal
+                except Exception as e:
+                    st.error(f"❌ Error al guardar o descargar el vídeo procesado: {e}")
+                    st.warning("Asegúrate de que FFmpeg está instalado correctamente en tu sistema para el guardado de vídeo.")
+
+        # Limpiar las listas de predicciones y frames guardados para la siguiente ejecución
+        # Esto es crucial para que los resultados no persistan si el usuario sube otro vídeo
+        st.session_state.predicciones_video_list = []
+        st.session_state.predicciones_audio_list = []
+        st.session_state.frames_procesados_para_guardar = []
+        st.session_state.predicciones_finales_fusionadas = []
+        st.session_state.predicciones_video_resampled = []
+        st.session_state.predicciones_audio_resampled = []
+        st.session_state.temp_audio_path = None
+
+
+# Llama a mostrar_resultados al final del script si hay predicciones para mostrar
+if st.session_state.predicciones_finales_fusionadas:
+    mostrar_resultados()
 else:
-    st.info("Esperando la captura o subida de vídeo para iniciar el análisis. No se han procesado frames aún.")
+    st.info("ℹ️ Esperando la captura o subida de vídeo para iniciar el análisis.")
+    st.markdown("---")
+    st.markdown("### Estado de los Recursos:")
+    # Mostrar el estado inicial de la carga de modelos para ayudar al usuario
+    # El estado de carga de model_video y model_audio ya se muestra al inicio
+    
+    # Comprobar estado de Haar Cascade
+    status_haar, success_haar = vu.init_face_cascade_classifier() # Re-chequear por si acaso
+    if not success_haar:
+        st.error(f"❌ Clasificador de Haar no listo: {status_haar}. La detección facial no funcionará.")
+    else:
+        st.success("✅ Clasificador de Haar listo.")
+    
+    # Comprobar estado de YAMNet y escalador (sus variables globales están en vu)
+    if not vu.YAMNET_MODEL:
+        st.error("❌ YAMNet no cargado. El análisis de audio puede fallar.")
+    else:
+        st.success("✅ YAMNet cargado.")
+
+    if not vu.audio_scaler:
+        st.error("❌ Escalador de audio no cargado. El análisis de audio puede ser impreciso.")
+    else:
+        st.success("✅ Escalador de audio cargado.")
+
+    # Comprobar FFmpeg (solo una comprobación básica, la real ocurre en las funciones)
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, text=True)
+        st.success("✅ FFmpeg detectado y accesible en tu PATH.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        st.error("❌ FFmpeg no detectado o no accesible en tu PATH. La extracción y guardado de audio/vídeo no funcionarán.")
+    
+    st.warning("☝️ Asegúrate de que todos los archivos necesarios (.h5, .npy, .xml y la carpeta 'yamnet') están en la carpeta 'model/' en el mismo directorio.")

@@ -1,100 +1,162 @@
-# Lie2Me - Detección de emociones y predisposición a repetir experiencia
+# Lie2Me - Detección de Predisposición (Vídeo y Audio)
+Este proyecto es una aplicación de análisis multimodal que combina el procesamiento de vídeo y audio para detectar emociones y predecir la predisposición de un individuo (por ejemplo, en el contexto de la interacción con clientes). Utiliza modelos de aprendizaje profundo para el análisis facial y de voz, ofreciendo una visión más completa que el análisis de un solo componente.
 
-Este proyecto es una aplicación de análisis facial para detectar emociones en clientes y predecir si están predispuestos a repetir una experiencia (por ejemplo, en la industria hotelera). Utiliza transferencia de aprendizaje con MobileNetV2 fine-tuneado para clasificación binaria basada en emociones faciales.
+## 🌟 Características Principales
+- Análisis Multimodal: Combina la detección de emociones faciales (vídeo) y la predisposición emocional basada en el tono de voz (audio) para una predicción fusionada.
 
----
+- Detección Facial Robusta: Utiliza el clasificador Haar Cascade de OpenCV para la detección de rostros en tiempo real.
 
-## Características principales
+- Modelos de Transferencia de Aprendizaje:
 
-- Detección de rostros en video o cámara en vivo usando `face_recognition`.
-- Clasificación binaria de predisposición basada en emociones faciales.
-- Interfaz interactiva con Streamlit.
-- Soporta entrada de video desde archivo o cámara en tiempo real.
-- Visualización de cajas con etiquetas de emoción sobre los rostros detectados.
-- Gráfico de evolución de emociones durante la sesión.
-- Exportación de predicciones en CSV.
-- Guardado opcional de video con anotaciones.
+    - Vídeo: Modelo MobileNetV2 fine-tuneado para clasificación binaria de predisposición basada en expresiones faciales.
 
----
+    - Audio: Modelo de red neuronal densa entrenado sobre embeddings de YAMNet (modelo pre-entrenado de Google) para clasificación binaria de predisposición vocal.
 
-## Estructura del proyecto
+- Extracción y Procesamiento de Audio: Utiliza FFmpeg para extraer la pista de audio de los vídeos subidos y librosa para su preprocesamiento y segmentación.
 
-├── Lie2Me_Project.ipynb # Notebook para entrenar modelo
+- Interfaz Interactiva con Streamlit: Aplicación web amigable para la interacción con el usuario.
 
-├── app.py # App principal de Streamlit
+- Soporte de Entrada Flexible:
 
-├── video_utils.py # Funciones para detección, preprocesado y visualización
+    - Cámara en Vivo: Captura de vídeo desde la webcam con límite de tiempo (ej. 10 segundos) y redimensionamiento para un mejor rendimiento.
 
-├── model/ # Carpeta con modelo entrenado .h5
+    - Subida de Vídeo: Análisis de vídeos desde archivos locales (.mp4, .avi, .mov).
 
-├── requirements.txt # Dependencias del proyecto
+- Visualización Detallada:
 
-└── README.md # Documentación
+    - Gráficos de evolución temporal para las predicciones de vídeo, audio y la fusión de ambos.
 
+    - Representación de cajas delimitadoras con etiquetas de predisposición sobre los rostros detectados en el vídeo.
 
----
+- Exportación de Resultados: Opción para guardar el vídeo procesado con las anotaciones faciales.
 
-## Cómo usar
+- Control de Ponderación: Ajusta el peso de las predicciones de vídeo y audio en la fusión final.
 
-### Entrenamiento
+## 📁 Estructura del Proyecto
+.
+├── app.py                     # Aplicación principal de Streamlit
+├── video_utils.py             # Funciones auxiliares para procesamiento de vídeo y audio
+├── requirements.txt           # Lista de dependencias de Python
+├── README.md                  # Este archivo de documentación
+└── model/                     # Carpeta para modelos entrenados y archivos auxiliares
+    ├── mobilenetv2_emotion_binario_finetune.h5 # Modelo de vídeo (predicción facial)
+    ├── audio_emotion_model.h5 # Modelo de audio (predicción vocal)
+    ├── audio_scaler.npy       # Escalador para los embeddings de audio
+    ├── haarcascade_frontalface_default.xml # Clasificador de Haar para detección facial
+    └── yamnet/                # Carpeta que contiene el modelo YAMNet de TensorFlow Hub
+        ├── saved_model.pb
+        └── variables/
+        └── assets/
+        └── ... (otros archivos de YAMNet)
 
-Se asume que el modelo `mobilenetv2_emotion_binario_finetune.h5` ya está entrenado y guardado en la carpeta `model/`.
+## 🚀 Cómo Usar
+### 🛠️ Entrenamiento (Preparación de Modelos)
+Se asume que los modelos mobilenetv2_emotion_binario_finetune.h5 y audio_emotion_model.h5 ya están entrenados y guardados en la carpeta model/. Además, el escalador audio_scaler.npy debe haber sido generado y guardado en la misma carpeta.
 
-### Ejecutar la app
+Nota: El modelo YAMNet (yamnet/) debe descargarse de TensorFlow Hub y colocarse en la carpeta model/.
 
-1. Instala dependencias:
+### 🏃 Ejecutar la Aplicación
+#### 1- Clona el repositorio:
 
-```bash
+git clone <URL_DE_TU_REPOSITORIO>
+cd <nombre_del_proyecto>
+
+#### 2- Crea y activa un entorno virtual (muy recomendado):
+
+python -m venv venv
+
+##### En Linux/macOS:
+source venv/bin/activate
+##### En Windows:
+venv\Scripts\activate
+
+#### 3- Instala las dependencias de Python:
+
 pip install -r requirements.txt
-```
 
-2. Ejecuta la app Streamlit:
+#### 4- Instala FFmpeg:
+FFmpeg es una herramienta externa esencial para la extracción de audio de vídeos y para guardar los vídeos procesados. No se instala con pip.
 
-```bash
+- En Linux (Ubuntu/Debian):
+
+sudo apt update
+sudo apt install ffmpeg
+
+- En macOS (con Homebrew):
+
+brew install ffmpeg
+
+- En Windows:
+Descarga los binarios precompilados desde ffmpeg.org/download.html, descomprímelos y añade la ruta a la carpeta bin de FFmpeg a las variables de entorno PATH de tu sistema. (Busca tutoriales específicos para "añadir FFmpeg al PATH en Windows" si necesitas ayuda).
+
+#### 5- Asegúrate de que los modelos están en la carpeta model/:
+Verifica que todos los archivos .h5, .npy, .xml y la carpeta yamnet/ estén correctamente ubicados dentro del directorio model/.
+
+#### 6- Ejecuta la aplicación Streamlit:
+
 streamlit run app.py
-```
 
-3. En la interfaz web puedes:
+#### 7- En la Interfaz Web (tu navegador):
 
-- Elegir "Cámara en vivo" para capturar video desde la webcam.
+    - Por defecto, la opción "Subir vídeo" estará seleccionada. Puedes subir un archivo de vídeo (.mp4, .avi, .mov) para un análisis completo (vídeo + audio).
 
-- Subir un archivo de video para analizarlo.
+    - Alternativamente, puedes elegir "Cámara en vivo" en la barra lateral para capturar vídeo desde tu webcam. La captura se detendrá automáticamente después de un tiempo predefinido para el análisis de vídeo.
 
-- Visualizar predicciones en tiempo real y descarga de resultados.
+    - Ajusta los pesos de las predicciones de vídeo y audio en la barra lateral para influir en la fusión final.
 
-### Tecnologías
-- TensorFlow/Keras (Transfer Learning con MobileNetV2)
+    - Visualiza los resultados detallados en gráficos y descarga el vídeo procesado con las anotaciones.
 
-- OpenCV (procesamiento de video)
+## 💻 Tecnologías Utilizadas
+- Python 3.9+
 
-- face_recognition (detección facial)
+- TensorFlow / Keras: Para la construcción y ejecución de modelos de aprendizaje profundo (MobileNetV2, Red Neuronal Densa para audio).
 
-- Streamlit (interfaz web interactiva)
+- TensorFlow Hub: Para cargar el modelo YAMNet pre-entrenado.
 
-- Matplotlib (visualización de gráficos)
+- OpenCV (opencv-python): Para procesamiento de vídeo, detección facial (Haar Cascade) y dibujo de anotaciones.
 
-### Requisitos
-- Python 3.7+
+- Streamlit: Para la creación de la interfaz de usuario web interactiva.
 
-- GPU recomendada para entrenamiento (opcional para inferencia)
+- FFmpeg: Herramienta externa de línea de comandos para la extracción de audio de vídeo y el guardado de vídeo procesado.
 
-## Licencia
+- Librosa: Para el preprocesamiento y análisis de señales de audio.
+
+- SoundFile: Soporte para lectura/escritura de archivos de audio (usado por Librosa).
+
+- NumPy: Computación numérica eficiente.
+
+- Pandas: Manipulación y análisis de datos.
+
+- Matplotlib: Generación de gráficos y visualizaciones.
+
+- Scikit-learn: Para el escalado de características (StandardScaler).
+
+- Joblib: Para guardar y cargar objetos Python eficientemente (el escalador).
+
+## 📦 requirements.txt
+### Core application framework
+streamlit==1.30.0
+
+### Deep Learning Framework
+tensorflow==2.15.0
+tensorflow-hub==0.16.1
+
+### Video Processing
+opencv-python==4.9.0.80
+
+### Audio Processing
+librosa==0.10.1
+soundfile==0.12.1
+
+### Numerical Computing & Data Handling
+numpy==1.26.4
+pandas==2.2.0
+matplotlib==3.8.3
+scikit-learn==1.4.0
+joblib==1.3.2
+
+## 📄 Licencia
 MIT License
 
-## Autores
-Tu Nombre - [Tu Email o GitHub]
-
----
-
-## requirements.txt
-
-- tensorflow>=2.11.0
-- opencv-python-headless
-- face_recognition
-- streamlit
-- matplotlib
-- numpy
-- pandas
-- Pillow
-
-pip install -r requirements.txt
+## ✒️ Autores
+Alejandro Cabrera y Manolo Castillo

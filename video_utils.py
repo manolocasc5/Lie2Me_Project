@@ -3,293 +3,393 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.keras.preprocessing.image import img_to_array
 import matplotlib.pyplot as plt
-import ffmpeg # Asegúrate de que ffmpeg-python está instalado (pip install ffmpeg-python)
-import os 
-import librosa # Para procesamiento de audio
-import soundfile as sf # Para guardar archivos de audio
+import os
+import librosa
+import soundfile as sf
+import subprocess
+import tensorflow_hub as hub
+from sklearn.preprocessing import StandardScaler
+import joblib
+import math # Asegúrate de que esta línea está aquí
 
 # --- Configuración global ---
-IMG_SIZE = 224 # Tamaño al que se redimensionan los rostros para el modelo
-AUDIO_SAMPLE_RATE = 22050 # Frecuencia de muestreo estándar para audio
-AUDIO_MFCCS = 40 # Número de MFCCs a extraer
+IMG_SIZE = 224
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_DURATION_SECONDS = 3 # Duración de cada segmento de audio para YAMNet en segundos
 
-# Variable global para el clasificador de Haar, inicializado por una función.
-face_cascade = None 
+SCALER_PATH = "model/audio_scaler.npy"
+FACE_CASCADE_PATH = "model/haarcascade_frontalface_default.xml"
+
+# Variables globales para los recursos cargados (se inicializan al importar el módulo)
+face_cascade = None
+YAMNET_MODEL = None
+audio_scaler = None
+
+# --- Funciones de inicialización y carga ---
 
 def init_face_cascade_classifier():
-    """
-    Inicializa el clasificador de Haar de OpenCV.
-    Retorna un mensaje de estado y un booleano indicando éxito.
-    """
+    """Inicializa el clasificador de Haar para detección facial."""
     global face_cascade
+    if face_cascade is None: # Solo intenta cargar si no está ya cargado
+        if not os.path.exists(FACE_CASCADE_PATH):
+            return f"Error: Clasificador de Haar no encontrado en '{FACE_CASCADE_PATH}'.", False
+        try:
+            face_cascade = cv2.CascadeClassifier(FACE_CASCADE_PATH)
+            if face_cascade.empty():
+                return "Error: Clasificador de Haar no pudo ser cargado. Archivo corrupto o inválido.", False
+        except Exception as e:
+            return f"Error al cargar clasificador de Haar: {e}", False
+    return "Clasificador de Haar inicializado.", True
 
-    try:
-        classifier_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        face_cascade = cv2.CascadeClassifier(classifier_path)
-        
-        if face_cascade.empty():
-            raise IOError(f"El clasificador de Haar NO SE CARGÓ. Archivo no encontrado o corrupto en: {classifier_path}")
-        
-        return "Clasificador de Haar cargado correctamente.", True
-    except Exception as e:
-        return f"Error crítico al cargar el clasificador de Haar: {e}. La detección de rostros no funcionará. Asegúrate de que 'haarcascade_frontalface_default.xml' está disponible y en la ruta correcta.", False
+# Carga global de YAMNET y el escalador de audio al importar el módulo
+# Estas cargas ocurren una vez cuando video_utils se importa por primera vez
+try:
+    print("Cargando modelo YAMNet para preprocesamiento de audio...")
+    # Puedes descargar el modelo de TF Hub o usar una copia local si lo has guardado
+    # YAMNET_MODEL_HANDLE = 'https://tfhub.dev/google/yamnet/1' # Versión online
+    YAMNET_MODEL_HANDLE = 'model/yamnet' # Versión local (asegúrate de tener la carpeta 'yamnet' dentro de 'model')
+    YAMNET_MODEL = hub.load(YAMNET_MODEL_HANDLE)
+    print("Modelo YAMNet cargado correctamente.")
+except Exception as e:
+    print(f"Error al cargar YAMNet: {e}. La predicción de audio podría fallar.")
+    YAMNET_MODEL = None
 
-# --- FUNCIÓN: Obtener ángulo de rotación del video (sin cambios) ---
-def get_video_rotation(video_path):
-    """
-    Obtiene el ángulo de rotación de un video a partir de sus metadatos usando ffprobe.
-    Normaliza el ángulo a 0, 90, 180, 270 grados.
-    Retorna el ángulo en grados o 0 si no se encuentra rotación o hay un error.
-    """
-    if not os.path.exists(video_path):
-        print(f"Error (get_video_rotation): El archivo de video no existe en la ruta: {video_path}")
-        return 0
-
-    try:
-        probe = ffmpeg.probe(video_path, select_streams='v', show_streams=None) 
-        
-        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
-        
-        if video_stream and 'tags' in video_stream:
-            rotation_tag = video_stream['tags'].get('rotate')
-            if rotation_tag is not None:
-                try:
-                    rotation = int(rotation_tag)
-                    if rotation == -90:
-                        return 270
-                    elif rotation == -270:
-                        return 90
-                    else:
-                        return rotation % 360 
-                except ValueError:
-                    print(f"Advertencia (get_video_rotation): El valor de rotación '{rotation_tag}' no es un número entero. Asumiendo 0 grados.")
-                    return 0
-    except ffmpeg.Error as e:
-        print(f"Error (get_video_rotation) al obtener metadatos de rotación con ffprobe: {e.stderr.decode()}")
-    except Exception as e:
-        print(f"Error inesperado (get_video_rotation) al obtener metadatos de rotación: {e}")
-    
-    return 0 
-
-# --- FUNCIÓN: Rotar un frame (sin cambios) ---
-def rotate_frame_if_needed(frame, rotation_angle):
-    """
-    Rota un frame de OpenCV según el ángulo de rotación especificado.
-    """
-    if rotation_angle == 90:
-        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-    elif rotation_angle == 180:
-        return cv2.rotate(frame, cv2.ROTATE_180)
-    elif rotation_angle == 270: 
-        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+try:
+    if os.path.exists(SCALER_PATH):
+        audio_scaler = joblib.load(SCALER_PATH)
+        print("Escalador de audio cargado exitosamente.")
     else:
-        return frame 
+        print(f"Advertencia: El archivo del escalador de audio no se encontró en '{SCALER_PATH}'. Las predicciones de audio serán imprecisas o fallarán.")
+        audio_scaler = None # Asegurarse de que sea None si no se carga
+except Exception as e:
+    print(f"Error al cargar el escalador de audio: {e}. La predicción de audio podría ser imprecisa o fallar.")
+    audio_scaler = None
 
-# --- NUEVA FUNCIÓN: Extraer audio de video ---
-def extract_audio_from_video(video_path, audio_output_path):
-    """
-    Extrae la pista de audio de un archivo de video usando FFmpeg.
-    """
-    try:
-        # Comando FFmpeg para extraer audio sin recodificar (copia directa)
-        # -vn: no video
-        # -acodec copy: copia el códec de audio original sin recodificar
-        # -y: sobrescribir archivo de salida si existe
-        ffmpeg_command = [
-            "ffmpeg",
-            "-i", video_path,
-            "-vn",
-            "-acodec", "copy",
-            "-y",
-            audio_output_path
-        ]
-        
-        subprocess.run(ffmpeg_command, check=True, capture_output=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"Error al extraer audio con FFmpeg: {e.stderr.decode()}")
-        return False
-    except FileNotFoundError:
-        print("Error: FFmpeg no encontrado. Asegúrate de que FFmpeg está instalado y en tu PATH.")
-        return False
-    except Exception as e:
-        print(f"Error inesperado durante la extracción de audio: {e}")
-        return False
 
-# --- NUEVA FUNCIÓN: Preprocesar audio (Extraer MFCCs) ---
-def preprocess_audio(audio_path, sr=AUDIO_SAMPLE_RATE, n_mfcc=AUDIO_MFCCS):
-    """
-    Carga un archivo de audio, extrae MFCCs y los prepara para un modelo de Keras.
-    """
-    try:
-        # Cargar audio
-        y, sr = librosa.load(audio_path, sr=sr)
-        
-        # Extraer MFCCs
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc)
-        
-        # Normalización y preparación para el modelo (esto puede variar según tu modelo de audio)
-        # Aquí, asumimos un modelo que espera una secuencia de MFCCs.
-        # Si tu modelo espera una imagen (e.g., Spectrograms), esta parte deberá cambiar.
-        # Para un modelo simple de clasificación, podríamos promediar o tomar la desviación estándar.
-        # Para modelos basados en secuencias (LSTMs, 1D CNNs), necesitarías una longitud fija.
-        
-        # Una forma simple para clasificación: promediar los MFCCs a lo largo del tiempo
-        mfccs_processed = np.mean(mfccs.T, axis=0) # Transponer para promediar a través de las columnas (tiempos)
-        
-        # Añadir dimensiones de batch y 'channels' si tu modelo lo espera (e.g., (1, features_dim))
-        mfccs_processed = np.expand_dims(mfccs_processed, axis=0) # Para batch_size
-        
-        return mfccs_processed
-    except Exception as e:
-        print(f"Error al preprocesar audio: {e}")
-        return None
+# --- Funciones de preprocesamiento y predicción ---
 
-# --- NUEVA FUNCIÓN: Predecir emoción del audio ---
-def predict_audio_emotion(model, audio_features):
+def preprocesar_y_predecir_video(frame, model_video):
     """
-    Realiza una predicción de emoción usando el modelo de audio.
+    Preprocesar un frame de vídeo para la detección facial y predecir la emoción.
+    Devuelve la probabilidad de predisposición y el frame con la detección dibujada.
     """
-    try:
-        if audio_features is None:
-            return 0.5 # Valor por defecto si no hay features
-
-        pred = model.predict(audio_features, verbose=0)[0][0]
-        return pred
-    except Exception as e:
-        print(f"Error al realizar la predicción de audio: {e}. Devolviendo 0.5 por defecto.")
-        return 0.5 
-
-# --- Resto de funciones (sin cambios en la funcionalidad, solo se reubican) ---
-def detectar_rostros(frame):
-    """
-    Detecta rostros en un frame dado usando el clasificador de Haar.
-    Retorna una lista de bounding boxes (top, right, bottom, left).
-    """
+    # Asegúrate de que el clasificador de Haar esté inicializado.
+    # Si no, intenta inicializarlo o retorna sin procesamiento facial.
     if face_cascade is None:
-        print("Advertencia: El clasificador de Haar no está inicializado. No se detectarán rostros.")
-        return []
-        
+        # Intenta inicializarlo de nuevo por si falló la primera vez
+        status, success = init_face_cascade_classifier()
+        if not success:
+            # print(f"Clasificador de Haar no inicializado: {status}. No se detectarán caras.")
+            return None, frame # Retornar el frame original si no hay clasificador
+
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    
-    boxes = []
-    for (x, y, w, h) in faces:
-        boxes.append((y, x + w, y + h, x)) 
-    return boxes
 
-def extraer_region_rostro(frame, box):
-    """
-    Extrae y redimensiona la región de un rostro de un frame.
-    """
-    top, right, bottom, left = box
-    h_frame, w_frame, _ = frame.shape
-    
-    top = max(0, top)
-    right = min(w_frame, right)
-    bottom = min(h_frame, bottom)
-    left = max(0, left)
+    prediccion_frame = None
+    frame_con_deteccion = frame.copy()
 
-    rostro = frame[top:bottom, left:right]
-    
-    if rostro.size == 0 or rostro.shape[0] < 10 or rostro.shape[1] < 10:
+    if len(faces) > 0:
+        (x, y, w, h) = faces[0] # Tomar la primera cara detectada
+
+        face_roi = frame[y:y+h, x:x+w]
+        # Asegurarse de que el ROI tiene dimensiones válidas antes de redimensionar
+        if face_roi.shape[0] == 0 or face_roi.shape[1] == 0:
+            return None, frame_con_deteccion
+
+        face_roi = cv2.resize(face_roi, (IMG_SIZE, IMG_SIZE))
+        face_roi = img_to_array(face_roi)
+        face_roi = np.expand_dims(face_roi, axis=0) # Añadir dimensión de batch
+        face_roi = face_roi / 255.0 # Normalizar
+
+        if model_video:
+            prediccion = model_video.predict(face_roi, verbose=0)[0][0]
+            prediccion_frame = float(prediccion)
+
+            # Dibujar rectángulo y etiqueta
+            color = (0, 255, 0) if prediccion_frame > 0.5 else (0, 0, 255) # Verde para predisposición, Rojo para no
+            label = f"Predisposicion: {prediccion_frame:.2f}" if prediccion_frame > 0.5 else f"No Predisposicion: {prediccion_frame:.2f}"
+            cv2.rectangle(frame_con_deteccion, (x, y), (x+w, y+h), color, 2)
+            cv2.putText(frame_con_deteccion, label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        # else:
+            # print("Advertencia: Modelo de vídeo no cargado. No se realizarán predicciones faciales.")
+
+    return prediccion_frame, frame_con_deteccion
+
+
+def preprocesar_audio_for_yamnet(audio_waveform, sr=AUDIO_SAMPLE_RATE, duration=AUDIO_DURATION_SECONDS):
+    """
+    Preprocesa una forma de onda de audio para que sea compatible con YAMNet,
+    ajustando la duración y normalizando.
+    """
+    if audio_waveform is None or len(audio_waveform) == 0:
+        # print("Advertencia: Forma de onda de audio vacía o nula.")
         return None
-    
+
+    # Normalizar la amplitud de la forma de onda
+    max_abs_val = np.max(np.abs(audio_waveform))
+    if max_abs_val > 0:
+        y = audio_waveform / max_abs_val
+    else:
+        y = audio_waveform # Evitar división por cero, aunque esto indica un audio silencioso
+
+    # Asegurar la duración correcta
+    target_length = sr * duration
+    if len(y) < target_length:
+        y = np.pad(y, (0, target_length - len(y)), mode='constant')
+    elif len(y) > target_length:
+        y = y[:target_length]
+
+    return y.astype(np.float32)
+
+
+def extract_yamnet_embeddings(audio_waveform, yamnet_model):
+    """
+    Extrae los embeddings de YAMNet de una forma de onda de audio.
+    """
+    if audio_waveform is None or yamnet_model is None:
+        # print("Advertencia: Forma de onda o modelo YAMNet nulos para extracción de embeddings.")
+        return None
+
+    # YAMNet devuelve scores, embeddings y un espectrograma
+    # Asegúrate de que el input para YAMNet sea una forma de onda de audio de tipo tf.float32
+    # YAMNet espera un tensor de 1D
+    audio_tensor = tf.constant(audio_waveform, dtype=tf.float32)
+
+    # Si YAMNet espera un batch, expandir dimensiones (aunque generalmente no para yamnet/1)
+    # Si la forma de onda ya es de la longitud esperada por YAMNet, no hay problema.
+    # scores, embeddings, spectrogram = yamnet_model(audio_tensor) # Esto funcionaría si audio_waveform ya tiene la longitud adecuada
+
+    # YAMNet procesa internamente en segmentos, la salida 'embeddings' ya es el promedio para el clip
+    # Para yamnet/1, la entrada es de 1 segundo a 16kHz
+    # Si tu segmento es de AUDIO_DURATION_SECONDS (ej. 3s), YAMNet lo procesa y devuelve un embedding por segundo.
+    # Por eso, `embeddings.numpy().mean(axis=0)` es adecuado.
+
     try:
-        rostro = cv2.resize(rostro, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_AREA)
-    except cv2.error as e:
-        print(f"Error de OpenCV al redimensionar rostro: {e}")
-        return None
+        scores, embeddings, spectrogram = yamnet_model(audio_tensor)
+        if embeddings.shape[0] > 0:
+            # Si YAMNet produce múltiples embeddings (para segmentos internos de 1s), promedia
+            return np.mean(embeddings.numpy(), axis=0)
+        else:
+            # print("Advertencia: YAMNet no produjo embeddings para el segmento de audio.")
+            return None
     except Exception as e:
-        print(f"Error inesperado al redimensionar rostro: {e}")
+        print(f"Error al ejecutar YAMNet: {e}. El segmento de audio podría ser inválido.")
         return None
-    return rostro
 
-def preprocesar_imagen(img):
-    """
-    Preprocesar una imagen de rostro para el modelo de Keras.
-    """
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
-    img = img_to_array(img)
-    img = img / 255.0 
-    return np.expand_dims(img, axis=0) 
 
-def predecir_emocion(modelo, imagen_preprocesada):
+def preprocesar_y_predecir_audio(audio_path, model_audio, yamnet_model, scaler_audio):
     """
-    Realiza una predicción de emoción usando el modelo de video.
+    Carga un archivo de audio, lo preprocesa con YAMNet, lo escala y predice la emoción.
+    Devuelve una lista de probabilidades de predisposición para cada segmento.
     """
+    if not os.path.exists(audio_path):
+        print(f"Advertencia: Archivo de audio no encontrado en {audio_path}")
+        return None
+
+    if yamnet_model is None or scaler_audio is None or model_audio is None:
+        print("Advertencia: Modelos o escalador de audio no cargados. Saltando predicción de audio.")
+        return None
+
+    all_segment_embeddings = []
     try:
-        pred = modelo.predict(imagen_preprocesada, verbose=0)[0][0]
-        return pred
+        # Cargar el audio. Librosa lo resamplea automáticamente al sr especificado.
+        y, sr = librosa.load(audio_path, sr=AUDIO_SAMPLE_RATE, mono=True)
     except Exception as e:
-        print(f"Error al realizar la predicción de video: {e}. Devolviendo 0.5 por defecto.")
-        return 0.5 
+        print(f"Error al cargar archivo de audio con librosa: {e}. Puede que el archivo esté corrupto o sea incompatible.")
+        return None
 
-def dibujar_caja_y_texto(frame, box, texto, color=(255, 0, 0), thickness=2, font_scale=0.8):
+    # Si el audio es muy corto, no podemos segmentar
+    if len(y) < sr * AUDIO_DURATION_SECONDS:
+        # print(f"Advertencia: El audio es demasiado corto ({len(y)/sr:.2f}s) para ser segmentado. Necesita al menos {AUDIO_DURATION_SECONDS} segundos.")
+        # Intentar procesarlo como un solo segmento si tiene sentido
+        processed_waveform = preprocesar_audio_for_yamnet(y, sr=sr, duration=AUDIO_DURATION_SECONDS)
+        if processed_waveform is not None:
+            embedding = extract_yamnet_embeddings(processed_waveform, yamnet_model)
+            if embedding is not None:
+                all_segment_embeddings.append(embedding)
+    else:
+        # Segmentar el audio si es más largo que la duración definida
+        segment_length_samples = sr * AUDIO_DURATION_SECONDS
+        num_segments = math.ceil(len(y) / segment_length_samples)
+
+        for i in range(num_segments):
+            start_sample = i * segment_length_samples
+            end_sample = min((i + 1) * segment_length_samples, len(y))
+            segment_waveform = y[start_sample:end_sample]
+
+            # Asegurarse de que el segmento tenga la longitud esperada por YAMNet
+            processed_waveform = preprocesar_audio_for_yamnet(segment_waveform, sr=sr, duration=AUDIO_DURATION_SECONDS)
+            if processed_waveform is not None:
+                embedding = extract_yamnet_embeddings(processed_waveform, yamnet_model)
+                if embedding is not None:
+                    all_segment_embeddings.append(embedding)
+
+    if not all_segment_embeddings:
+        print("No se pudieron extraer embeddings de audio. No hay datos para predecir.")
+        return None
+
+    X_embeddings = np.array(all_segment_embeddings)
+
+    if scaler_audio:
+        # Asegurarse de que el escalador tiene la misma cantidad de features que los embeddings
+        if X_embeddings.shape[1] != scaler_audio.n_features_in_:
+            print(f"Error: La dimensión de los embeddings ({X_embeddings.shape[1]}) no coincide con el escalador ({scaler_audio.n_features_in_}).")
+            return None
+        X_scaled = scaler_audio.transform(X_embeddings)
+    else:
+        print("Advertencia: Escalador de audio no disponible. Las predicciones pueden ser imprecisas.")
+        X_scaled = X_embeddings # Procede sin escalar si no hay escalador
+
+    predicciones = model_audio.predict(X_scaled, verbose=0)
+
+    # Asegurarse de que la salida es una lista simple de floats
+    return predicciones.flatten().tolist()
+
+
+def fusionar_predicciones(predicciones_video, predicciones_audio, video_weight, audio_weight):
     """
-    Dibuja una bounding box y texto en un frame.
+    Fusiona las predicciones de vídeo y audio.
+    Normaliza las listas para que tengan la misma longitud antes de fusionar.
+    Devuelve la lista fusionada, y las listas de vídeo y audio remuestreadas.
     """
-    top, right, bottom, left = box
-    top, right, bottom, left = int(top), int(right), int(bottom), int(left)
+    # Si no hay ninguna predicción, devuelve listas vacías para todo
+    if not predicciones_video and not predicciones_audio:
+        return [], [], []
 
-    cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
-    
-    text_size = cv2.getTextSize(texto, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
-    text_x = left
-    text_y = top - 10
-    if text_y < text_size[1]: 
-        text_y = top + text_size[1] + 5
+    # Inicializa las listas remuestreadas.
+    predicciones_video_resampled = []
+    predicciones_audio_resampled = []
 
-    cv2.putText(frame, texto, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+    # Casos donde solo hay vídeo o solo hay audio (para asegurar consistencia en el retorno)
+    if not predicciones_audio:
+        # Si no hay audio, la fusión es solo el vídeo.
+        # Devuelve el vídeo original, una lista vacía para audio (o replicada para gráfico), y el vídeo fusionado.
+        # Asegurarse de que si el audio_weight es 0, la fusión sea solo el vídeo.
+        if audio_weight == 0:
+            return predicciones_video, predicciones_video, []
+        else: # Si hay peso de audio pero no hay datos de audio, la fusión es solo el video
+            return predicciones_video, predicciones_video, [] # Mantener predicciones_audio_resampled vacía si no hay audio
+    if not predicciones_video:
+        # Si no hay vídeo, la fusión es solo el audio.
+        if video_weight == 0:
+            return predicciones_audio, [], predicciones_audio
+        else: # Si hay peso de vídeo pero no hay datos de vídeo, la fusión es solo el audio
+            return predicciones_audio, [], predicciones_audio
 
-def graficar_predicciones(predicciones, titulo="Evolución de la Predicción"):
+
+    len_video = len(predicciones_video)
+    len_audio = len(predicciones_audio)
+
+    # Remuestreo para igualar longitudes
+    if len_video > len_audio:
+        predicciones_audio_resampled = np.interp(
+            np.linspace(0, len_audio - 1, len_video),
+            np.arange(len_audio),
+            predicciones_audio
+        ).tolist()
+        predicciones_video_resampled = predicciones_video # El vídeo no necesita remuestreo
+    elif len_audio > len_video:
+        predicciones_video_resampled = np.interp(
+            np.linspace(0, len_video - 1, len_audio),
+            np.arange(len_video),
+            predicciones_video
+        ).tolist()
+        predicciones_audio_resampled = predicciones_audio # El audio no necesita remuestreo
+    else: # Misma longitud
+        predicciones_video_resampled = predicciones_video
+        predicciones_audio_resampled = predicciones_audio
+
+    # Realizar la fusión
+    fusionadas = []
+    # Asegúrate de que las listas tienen la misma longitud antes del zip para evitar IndexError
+    min_len = min(len(predicciones_video_resampled), len(predicciones_audio_resampled))
+    for pv, pa in zip(predicciones_video_resampled[:min_len], predicciones_audio_resampled[:min_len]):
+        fusionadas.append((pv * video_weight) + (pa * audio_weight))
+
+    return fusionadas, predicciones_video_resampled, predicciones_audio_resampled
+
+
+# --- Función para extraer audio del vídeo usando FFmpeg ---
+def extraer_audio_ffmpeg(video_path, output_audio_path):
     """
-    Genera una gráfica de la evolución de las predicciones.
+    Extrae la pista de audio de un archivo de vídeo usando FFmpeg.
     """
-    if not predicciones:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.text(0.5, 0.5, "No hay datos de predicciones para graficar.", horizontalalignment='center', verticalalignment='center', transform=ax.transAxes, fontsize=12, color='gray')
-        ax.set_title(titulo)
-        ax.set_xticks([]) 
-        ax.set_yticks([])
-        return fig
+    command = [
+        'ffmpeg',
+        '-y', # Sobreescribir el archivo de salida si existe, sin preguntar
+        '-i', video_path,
+        '-vn',             # Deshabilita el vídeo
+        '-acodec', 'pcm_s16le', # Codec de audio: PCM de 16 bits little-endian
+        '-ar', str(AUDIO_SAMPLE_RATE), # Frecuencia de muestreo (16000 Hz)
+        '-ac', '1',        # Un solo canal de audio (mono)
+        output_audio_path
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        # print("FFmpeg STDOUT (extraer audio):", result.stdout)
+        # print("FFmpeg STDERR (extraer audio):", result.stderr)
+    except subprocess.CalledProcessError as e:
+        error_msg = f"FFmpeg falló al extraer audio (código {e.returncode}).\n"
+        error_msg += f"Comando: {' '.join(e.cmd)}\n"
+        error_msg += f"STDOUT: {e.stdout}\n"
+        error_msg += f"STDERR: {e.stderr}"
+        # print(error_msg)
+        raise RuntimeError(f"FFmpeg falló al extraer audio: {e.stderr}")
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg no encontrado. Asegúrate de que FFmpeg está instalado y accesible en tu PATH.")
+    except Exception as e:
+        raise RuntimeError(f"Un error inesperado ocurrió al extraer audio: {e}")
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(predicciones, marker='o', linestyle='-', color='orange', alpha=0.7)
-    ax.axhline(0.5, color='gray', linestyle='--', label='Umbral (0.5)')
-    ax.set_title(titulo)
-    ax.set_xlabel("Número de Detección (orden cronológico)")
-    ax.set_ylabel("Predicción de Predisposición (0-1)")
-    ax.set_ylim(-0.1, 1.1) 
-    ax.legend()
-    ax.grid(True, linestyle=':', alpha=0.6)
-    plt.tight_layout() 
-    return fig
-
-def guardar_video(frames, path, fps=15):
+# --- Función para guardar frames como vídeo (requiere FFmpeg) ---
+def guardar_frames_como_video(frames, output_path, fps):
     """
-    Guarda una lista de frames como un archivo de video.
+    Guarda una lista de frames (imágenes NumPy) como un archivo de vídeo MP4 usando FFmpeg.
     """
     if not frames:
-        print("Advertencia: No hay frames para guardar en el video.")
-        return False
-        
+        print("No hay frames para guardar.")
+        return
+
     height, width, _ = frames[0].shape
     
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-    out = cv2.VideoWriter(path, fourcc, fps, (width, height))
+    # FFmpeg comando para crear un MP4 a partir de frames raw
+    command = [
+        'ffmpeg',
+        '-y', # Sobreescribir el archivo de salida si existe, sin preguntar
+        '-f', 'rawvideo',
+        '-vcodec', 'rawvideo',
+        '-s', f"{width}x{height}",
+        '-pix_fmt', 'bgr24', # Formato de píxel de OpenCV (BGR)
+        '-r', str(fps),     # Framerate
+        '-i', '-',          # Entrada desde stdin
+        '-c:v', 'libx264',  # Codec de vídeo
+        '-pix_fmt', 'yuv420p', # Formato de píxel de salida (compatible con la mayoría de reproductores)
+        '-preset', 'fast',  # Velocidad de codificación (ultra-fast, superfast, fast, medium, slow, etc.)
+        output_path
+    ]
 
-    if not out.isOpened():
-        print(f"Error: No se pudo abrir el archivo de salida del video: {path}. Verifica permisos o códecs instalados.")
-        return False
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    for i, f in enumerate(frames):
-        try:
-            out.write(f)
-        except Exception as e:
-            print(f"Error al escribir el frame {i} en el video: {e}")
-            break 
+        for frame in frames:
+            # Escribir los bytes del frame directamente al stdin de FFmpeg
+            process.stdin.write(frame.tobytes())
 
-    out.release()
-    print(f"Video guardado exitosamente en: {path}")
-    return True
+        process.stdin.close() # Importante cerrar stdin para que FFmpeg sepa que no hay más datos
+
+        # Capturar la salida de error para depuración
+        stderr = process.stderr.read().decode()
+        process.wait() # Esperar a que el proceso termine
+
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr)
+
+    except subprocess.CalledProcessError as e:
+        error_msg = f"FFmpeg falló al guardar vídeo (código {e.returncode}).\n"
+        error_msg += f"Comando: {' '.join(e.cmd)}\n"
+        error_msg += f"STDERR: {e.stderr}"
+        # print(error_msg)
+        raise RuntimeError(f"FFmpeg falló al guardar vídeo: {e.stderr}")
+    except FileNotFoundError:
+        raise RuntimeError("FFmpeg no encontrado. Asegúrate de que FFmpeg está instalado y accesible en tu PATH.")
+    except Exception as e:
+        raise RuntimeError(f"Un error inesperado ocurrió al guardar vídeo: {e}")
